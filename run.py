@@ -35,21 +35,18 @@ def slate_date() -> str:
 
 def select_games(scored: list) -> list:
     """Top game always; others must clear the floor. Cap at MAX_GAMES."""
-    if not scored:
-        return []
-    picked = [scored[0]]  # most exciting always posts
-    for s in scored[1:]:
-        if len(picked) >= MAX_GAMES:
-            break
-        if sg.qualifies(s):
-            picked.append(s)
-    return picked
+    # Only games that actually clear a lens get posted. If nothing qualifies,
+    # we stay silent — that silence now means "genuinely nothing happened."
+    picked = [s for s in scored if sg.qualifies(s)]
+    return picked[:MAX_GAMES]
 
 
 def to_chart_dict(s) -> dict:
     return {
         "away": s.away, "home": s.home,
         "away_abbr": s.away_abbr, "home_abbr": s.home_abbr,
+        "away_color": s.away_color, "home_color": s.home_color,
+        "away_id": s.away_id, "home_id": s.home_id,
         "badge": s.badge, "series": s.series, "innings": s.innings,
     }
 
@@ -65,7 +62,7 @@ def main() -> int:
 
     games = select_games(scored)
     print(f"[squiggle] {len(scored)} scored; posting {len(games)} "
-          f"(floor {sg.EXCITEMENT_FLOOR})")
+          f"(comeback<= {sg.COMEBACK_MAX_LOW}, swings>= {sg.BACK_FORTH_MIN_SWINGS})")
 
     text = build_post_text(games)
     if not text:

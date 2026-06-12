@@ -10,7 +10,7 @@ from __future__ import annotations
 
 MAX_GAMES = 4          # top game + up to 3 more that clear the floor
 INTRO = "Last night's squiggliest \u26be"
-FOOTER = "Charts = win probability. \U0001F3A2 swing \u00b7 \U0001F501 back-and-forth \u00b7 \U0001F62C nailbiter"
+FOOTER = "Charts = win probability. \U0001F3A2 big swings \u00b7 \U0001F501 comeback from a deep hole"
 
 
 def matchup_line(s) -> str:

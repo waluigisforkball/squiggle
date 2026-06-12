@@ -1,15 +1,17 @@
 """
-Squiggle — MLB excitement scorer.
+Squiggle — MLB excitement scorer (v2: two-lens model).
 
 Pulls completed games for a date, reads per-play win probability from the MLB
-GUMBO live feed, and computes a Tango-style Excitement Index plus secondary
-signals (lead changes, late-game tightness). No result-revealing data is ever
-returned from this module — only team names, scores, and category badges.
+winProbability endpoint, and evaluates each game on TWO independent lenses:
 
-PROBE NOTE: The exact JSON path to per-play win probability is the one thing
-that must be verified against the live API on first run. Run:
-    python score_games.py --probe <gamePk>
-to dump the candidate field paths for a single game before trusting scores.
+  COMEBACK     — did the eventual winner sink to a deep low and climb back?
+                 Measured by the winner's single lowest win-probability point.
+  BACK_FORTH   — how many BIG (40%+) peak-to-trough momentum reversals?
+                 Measured by counting significant swings; tiny fidget ignored.
+
+A game can qualify on either lens, both, or neither. Each lens has its own
+threshold, tunable below. Raw total-movement (the old Excitement Index) is
+retained only as a tiebreaker/diagnostic, not as a qualifier.
 """
 
 from __future__ import annotations
@@ -20,29 +22,69 @@ import urllib.request
 from dataclasses import dataclass
 
 SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date}"
-# Per-play win probability lives on its OWN endpoint, not the live/GUMBO feed.
-# Each entry is a play carrying top-level homeTeamWinProbability (0-100).
 WP_URL = "https://statsapi.mlb.com/api/v1/game/{game_pk}/winProbability"
 
-# --- Tuning knobs ---------------------------------------------------------
-# Excitement floor: a game must clear this Tango EI to qualify. Calibrate with
-# calibrate.py against real slates before trusting. Placeholder until tuned.
-# Excitement floor: tuned against the 2026-06-10 slate. At 3.3 only genuinely
-# notable games clear (comebacks + late-tight swings); the 2.x "one mild swing"
-# games and sub-2 duds are correctly excluded. Stricter = more trustworthy bot.
-EXCITEMENT_FLOOR = 3.3
-# A play counts as a lead change if home WP crosses the 50% line decisively.
-LEAD_LINE = 0.50
-# Deadband: WP must move past 50% by this margin to count as a real lead
-# change. Stops coin-flip jitter near 50% from inflating the comeback signal.
-LEAD_DEADBAND = 0.10  # i.e. must reach 0.40 / 0.60 to "commit" to a side
-# A game earns 🔁 Comeback only with this many decisive lead changes. Set high
-# so the badge stays special — reserved for true back-and-forth slugfests.
-COMEBACK_MIN_LEAD_CHANGES = 4
-# "Late" tightness window: innings 7+.
-LATE_INNING = 7
-# How close to 50% counts as a nailbiter in the late window.
-TIGHT_BAND = 0.15
+# --- Tuning knobs (two-lens model) ---------------------------------------
+# COMEBACK: the eventual winner must have fallen at or below this WP at some
+# point. 0.15 = "deep hole" (winner was once <=15% to win).
+COMEBACK_MAX_LOW = 0.15
+# BACK-AND-FORTH: a "significant swing" is a peak-to-trough (or trough-to-peak)
+# reversal of at least this much WP. 0.40 = only big, game-defining swings.
+SWING_THRESHOLD = 0.40
+# How many significant swings to qualify as a back-and-forth game.
+BACK_FORTH_MIN_SWINGS = 2
+
+# --- Team abbreviations, IDs, and colors ----------------------------------
+# Full name -> (abbreviation, MLB team id, primary hex, secondary hex).
+# team id powers the logo URL; colors power the gradient line.
+TEAM_INFO = {
+    "Arizona Diamondbacks": ("AZ", 109, "#A71930", "#E3D4AD"),
+    "Atlanta Braves": ("ATL", 144, "#CE1141", "#13274F"),
+    "Baltimore Orioles": ("BAL", 110, "#DF4601", "#000000"),
+    "Boston Red Sox": ("BOS", 111, "#BD3039", "#0C2340"),
+    "Chicago Cubs": ("CHC", 112, "#0E3386", "#CC3433"),
+    "Chicago White Sox": ("CWS", 145, "#27251F", "#C4CED4"),
+    "Cincinnati Reds": ("CIN", 113, "#C6011F", "#000000"),
+    "Cleveland Guardians": ("CLE", 114, "#00385D", "#E50022"),
+    "Colorado Rockies": ("COL", 115, "#33006F", "#C4CED4"),
+    "Detroit Tigers": ("DET", 116, "#0C2340", "#FA4616"),
+    "Houston Astros": ("HOU", 117, "#002D62", "#EB6E1F"),
+    "Kansas City Royals": ("KC", 118, "#004687", "#BD9B60"),
+    "Los Angeles Angels": ("LAA", 108, "#003263", "#BA0021"),
+    "Los Angeles Dodgers": ("LAD", 119, "#005A9C", "#EF3E42"),
+    "Miami Marlins": ("MIA", 146, "#00A3E0", "#EF3340"),
+    "Milwaukee Brewers": ("MIL", 158, "#12284B", "#FFC52F"),
+    "Minnesota Twins": ("MIN", 142, "#002B5C", "#D31145"),
+    "New York Mets": ("NYM", 121, "#002D72", "#FF5910"),
+    "New York Yankees": ("NYY", 147, "#003087", "#E4002C"),
+    "Athletics": ("ATH", 133, "#003831", "#EFB21E"),
+    "Oakland Athletics": ("OAK", 133, "#003831", "#EFB21E"),
+    "Philadelphia Phillies": ("PHI", 143, "#E81828", "#002D72"),
+    "Pittsburgh Pirates": ("PIT", 134, "#27251F", "#FDB827"),
+    "San Diego Padres": ("SD", 135, "#2F241D", "#FFC425"),
+    "San Francisco Giants": ("SF", 137, "#FD5A1E", "#27251F"),
+    "Seattle Mariners": ("SEA", 136, "#0C2C56", "#005C5C"),
+    "St. Louis Cardinals": ("STL", 138, "#C41E3A", "#0C2340"),
+    "Tampa Bay Rays": ("TB", 139, "#092C5C", "#8FBCE6"),
+    "Texas Rangers": ("TEX", 140, "#003278", "#C0111F"),
+    "Toronto Blue Jays": ("TOR", 141, "#134A8E", "#1D2D5C"),
+    "Washington Nationals": ("WSH", 120, "#AB0003", "#14225A"),
+}
+
+
+def abbr(name: str) -> str:
+    if name in TEAM_INFO:
+        return TEAM_INFO[name][0]
+    parts = name.split()
+    return (parts[-1][:3]).upper() if parts else name[:3].upper()
+
+
+def team_id(name: str) -> int | None:
+    return TEAM_INFO[name][1] if name in TEAM_INFO else None
+
+
+def team_color(name: str) -> str:
+    return TEAM_INFO[name][2] if name in TEAM_INFO else "#1a6ef5"
 
 
 @dataclass
@@ -52,19 +94,25 @@ class GameScore:
     home: str
     away_abbr: str
     home_abbr: str
-    excitement: float
-    lead_changes: int
-    late_tight: bool
-    badge: str           # emoji + label (for post text)
-    series: list         # home win prob per play, 0..1 (for the chart)
-    innings: list        # parallel inning number per play (for x-axis)
-    away_score: int      # final score (for post text only, never the chart)
+    away_color: str
+    home_color: str
+    away_id: int
+    home_id: int
+    # metrics
+    total_movement: float        # old EI, diagnostic/tiebreak only
+    big_swings: int              # count of 40%+ reversals
+    winner_low: float            # eventual winner's lowest WP (0..1)
+    is_comeback: bool
+    is_back_forth: bool
+    badge: str                   # emoji + label for post text
+    # chart + post data
+    series: list                 # home win prob per play, 0..1
+    innings: list
+    away_score: int
     home_score: int
 
 
 def _get_json(url: str):
-    """Fetch JSON. Returns parsed data, or None on HTTP/network error so a
-    single missing game can't crash a whole slate."""
     req = urllib.request.Request(url, headers={"User-Agent": "squiggle-bot"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -76,47 +124,25 @@ def _get_json(url: str):
 
 
 def fetch_completed_games(date: str) -> list[dict]:
-    """Return [{gamePk, away, home, away_abbr, home_abbr}] for Final games."""
     data = _get_json(SCHEDULE_URL.format(date=date))
     dates = data.get("dates", []) if data else []
     if not dates:
         return []
     out = []
     for g in dates[0].get("games", []):
-        state = g.get("status", {}).get("abstractGameState", "")
-        if state != "Final":
+        if g.get("status", {}).get("abstractGameState", "") != "Final":
             continue
-        away_t = g["teams"]["away"]["team"]
-        home_t = g["teams"]["home"]["team"]
-        out.append(
-            {
-                "gamePk": g["gamePk"],
-                "away": away_t["name"],
-                "home": home_t["name"],
-                # abbreviation may not be on the schedule team stub; fall back
-                # to a short slice of the name, corrected later if needed.
-                "away_abbr": away_t.get("abbreviation")
-                             or _abbr_fallback(away_t["name"]),
-                "home_abbr": home_t.get("abbreviation")
-                             or _abbr_fallback(home_t["name"]),
-            }
-        )
+        away_n = g["teams"]["away"]["team"]["name"]
+        home_n = g["teams"]["home"]["team"]["name"]
+        out.append({
+            "gamePk": g["gamePk"],
+            "away": away_n, "home": home_n,
+            "away_abbr": abbr(away_n), "home_abbr": abbr(home_n),
+        })
     return out
 
 
-def _abbr_fallback(name: str) -> str:
-    """Last-resort abbreviation if the API stub lacks one: initials of the
-    final word(s). e.g. 'Red Sox' -> 'RS'. Real abbr comes from the API."""
-    parts = name.split()
-    return (parts[-1][:3]).upper() if parts else name[:3].upper()
-
-
 def _extract_home_wp(play: dict):
-    """
-    Home-team win probability for a single play, from the confirmed top-level
-    `homeTeamWinProbability` field (0-100 scale). Normalized to 0..1.
-    Returns None if absent.
-    """
     wp = play.get("homeTeamWinProbability")
     if isinstance(wp, (int, float)):
         return wp / 100.0
@@ -124,13 +150,7 @@ def _extract_home_wp(play: dict):
 
 
 def fetch_wp_series(game_pk: int):
-    """
-    Return (series, innings, final_away, final_home):
-      series  - home win prob per play, 0..1
-      innings - parallel inning number per play
-      final_*  - final score from the last play's result block
-    On error returns ([], [], None, None).
-    """
+    """Return (series, innings, final_away, final_home)."""
     plays = _get_json(WP_URL.format(game_pk=game_pk))
     if not isinstance(plays, list) or not plays:
         return [], [], None, None
@@ -141,139 +161,135 @@ def fetch_wp_series(game_pk: int):
             continue
         series.append(wp)
         innings.append(p.get("about", {}).get("inning", 0))
-    # Final score: scan from the end for a play that carries both scores.
     final_away = final_home = None
     for p in reversed(plays):
         res = p.get("result", {})
         if "awayScore" in res and "homeScore" in res:
-            final_away = res["awayScore"]
-            final_home = res["homeScore"]
+            final_away, final_home = res["awayScore"], res["homeScore"]
             break
     return series, innings, final_away, final_home
 
 
-def excitement_index(series: list[float]) -> float:
-    """Tango Excitement Index: sum of absolute win-probability changes."""
+def total_movement(series: list[float]) -> float:
+    """Old Excitement Index: sum of |delta WP|. Diagnostic / tiebreaker."""
     return sum(abs(series[i] - series[i - 1]) for i in range(1, len(series)))
 
 
-def count_lead_changes(series: list[float]) -> int:
+def count_big_swings(series: list[float], threshold: float = SWING_THRESHOLD) -> int:
     """
-    Number of decisive lead changes. A "side" is only committed once WP moves
-    past 50% by LEAD_DEADBAND (e.g. >=0.60 home, <=0.40 away). A lead change is
-    counted when the committed side flips. Jitter inside the deadband around
-    50% is ignored, so a tight nailbiter doesn't read as a comeback.
+    Count significant peak-to-trough reversals of >= threshold WP.
+
+    Track the running extreme in the current direction. When price reverses
+    from that extreme by >= threshold, count one swing and pivot: the point we
+    reversed to becomes the new extreme, and direction flips. Small fidget
+    never reaches the threshold, so it's ignored.
     """
-    hi = LEAD_LINE + LEAD_DEADBAND
-    lo = LEAD_LINE - LEAD_DEADBAND
-    side = 0          # -1 = away committed, +1 = home committed, 0 = neither
-    changes = 0
-    for wp in series:
-        if wp >= hi:
-            new = 1
-        elif wp <= lo:
-            new = -1
-        else:
-            continue  # inside deadband, no commitment change
-        if side != 0 and new != side:
-            changes += 1
-        side = new
-    return changes
+    if len(series) < 2:
+        return 0
+    swings = 0
+    extreme = series[0]
+    direction = 0  # 0 unknown, +1 rising, -1 falling
+    for wp in series[1:]:
+        if direction == 1:
+            if wp > extreme:
+                extreme = wp                      # extend the high
+            elif extreme - wp >= threshold:
+                swings += 1                       # fell far enough -> swing
+                extreme = wp
+                direction = -1
+        elif direction == -1:
+            if wp < extreme:
+                extreme = wp                      # extend the low
+            elif wp - extreme >= threshold:
+                swings += 1                       # rose far enough -> swing
+                extreme = wp
+                direction = 1
+        else:  # direction unknown — establish it on first real move
+            if wp > extreme:
+                direction = 1; extreme = wp
+            elif wp < extreme:
+                direction = -1; extreme = wp
+    return swings
 
 
-def late_tightness(series: list[float], innings: list | None = None) -> bool:
+def winner_low_point(series: list[float], home_score: int, away_score: int) -> float:
     """
-    Was the game still within TIGHT_BAND of 50% in the late innings (7+)?
-    Uses real inning data when provided; otherwise approximates "late" as the
-    final third of plays.
+    The eventual winner's single lowest win-probability value (0..1).
+    If home won, that's min(home WP); if away won, min(away WP) = min(1 - home).
     """
-    if len(series) < 6:
-        return False
-    if innings and len(innings) == len(series):
-        tail = [wp for wp, inn in zip(series, innings) if inn >= LATE_INNING]
-        if not tail:
-            tail = series[int(len(series) * 0.66):]
-    else:
-        tail = series[int(len(series) * 0.66):]
-    return any(abs(wp - LEAD_LINE) <= TIGHT_BAND for wp in tail)
+    if not series:
+        return 0.5
+    if home_score > away_score:            # home won
+        return min(series)
+    elif away_score > home_score:          # away won
+        return min(1.0 - wp for wp in series)
+    return 0.5                              # tie (shouldn't happen in MLB)
 
 
-def categorize(ei: float, lead_changes: int, late_tight: bool) -> str:
-    """
-    Pick the badge from whichever dimension dominates.
-    Priority: many decisive lead changes -> comeback (reserved for true
-    back-and-forth games); sustained late tightness -> nailbiter; otherwise
-    high total swing -> rollercoaster. The floor guarantees every badged game
-    already has meaningful total swing, so rollercoaster is an honest default.
-    """
-    if lead_changes >= COMEBACK_MIN_LEAD_CHANGES:
+def categorize(is_comeback: bool, is_back_forth: bool) -> str:
+    """Badge reflects which lens(es) the game earned."""
+    if is_comeback and is_back_forth:
+        return "🔁🎢 Comeback + Back-and-forth"
+    if is_comeback:
         return "🔁 Comeback"
-    if late_tight:
-        return "😬 Nailbiter"
-    return "🎢 Rollercoaster"
+    if is_back_forth:
+        return "🎢 Back-and-forth"
+    return ""  # no badge — shouldn't be posted
 
 
 def score_game(game: dict) -> GameScore | None:
-    series, innings, away_score, home_score = fetch_wp_series(game["gamePk"])
+    series, innings, a_score, h_score = fetch_wp_series(game["gamePk"])
     if len(series) < 2:
         return None
-    ei = excitement_index(series)
-    lc = count_lead_changes(series)
-    lt = late_tightness(series, innings)
+    a_score = a_score or 0
+    h_score = h_score or 0
+    tm = total_movement(series)
+    swings = count_big_swings(series)
+    low = winner_low_point(series, h_score, a_score)
+    is_cb = low <= COMEBACK_MAX_LOW
+    is_bf = swings >= BACK_FORTH_MIN_SWINGS
     return GameScore(
-        game_pk=game["gamePk"],
-        away=game["away"],
-        home=game["home"],
-        away_abbr=game["away_abbr"],
-        home_abbr=game["home_abbr"],
-        excitement=round(ei, 3),
-        lead_changes=lc,
-        late_tight=lt,
-        badge=categorize(ei, lc, lt),
-        series=series,
-        innings=innings,
-        away_score=away_score if away_score is not None else 0,
-        home_score=home_score if home_score is not None else 0,
+        game_pk=game["gamePk"], away=game["away"], home=game["home"],
+        away_abbr=game["away_abbr"], home_abbr=game["home_abbr"],
+        away_color=team_color(game["away"]), home_color=team_color(game["home"]),
+        away_id=team_id(game["away"]) or 0, home_id=team_id(game["home"]) or 0,
+        total_movement=round(tm, 3), big_swings=swings,
+        winner_low=round(low, 3), is_comeback=is_cb, is_back_forth=is_bf,
+        badge=categorize(is_cb, is_bf),
+        series=series, innings=innings,
+        away_score=a_score, home_score=h_score,
     )
 
 
-def qualifies(score: GameScore) -> bool:
-    return score.excitement >= EXCITEMENT_FLOOR
+def qualifies(s: GameScore) -> bool:
+    return s.is_comeback or s.is_back_forth
 
 
 def score_date(date: str) -> list[GameScore]:
     games = fetch_completed_games(date)
-    scored = []
-    for g in games:
-        s = score_game(g)
-        if s:
-            scored.append(s)
-    # Rank by EI, tie-break on lead changes for stability.
-    scored.sort(key=lambda s: (s.excitement, s.lead_changes), reverse=True)
+    scored = [s for g in games if (s := score_game(g))]
+    # Rank by big swings, then comeback depth, then total movement.
+    scored.sort(key=lambda s: (s.big_swings, 1.0 - s.winner_low,
+                               s.total_movement), reverse=True)
     return scored
 
 
 def _probe(game_pk: int) -> None:
-    """Dump candidate WP field locations for one game to verify the path."""
     plays = _get_json(WP_URL.format(game_pk=int(game_pk)))
     if not isinstance(plays, list):
         print("Unexpected response shape — not a list of plays.")
         return
     print(f"Total plays: {len(plays)}")
     if not plays:
-        print("No plays found — check feed structure.")
         return
-    sample = plays[len(plays) // 2]
-    print("homeTeamWinProbability:", sample.get("homeTeamWinProbability"))
-    wp = _extract_home_wp(sample)
-    print("Extracted home WP (normalized 0..1):", wp)
     series, innings, fa, fh = fetch_wp_series(int(game_pk))
-    print(f"Series length: {len(series)}  innings captured: {len(innings)}")
-    print(f"Final score (away-home): {fa}-{fh}")
+    print(f"Series length: {len(series)}  final (away-home): {fa}-{fh}")
     if series:
-        print(f"EI: {excitement_index(series):.3f}  "
-              f"lead_changes: {count_lead_changes(series)}  "
-              f"late_tight: {late_tightness(series, innings)}")
+        low = winner_low_point(series, fh or 0, fa or 0)
+        print(f"big_swings(40%): {count_big_swings(series)}  "
+              f"winner_low: {low:.3f}  total_movement: {total_movement(series):.3f}")
+        print(f"comeback: {low <= COMEBACK_MAX_LOW}  "
+              f"back_forth: {count_big_swings(series) >= BACK_FORTH_MIN_SWINGS}")
 
 
 if __name__ == "__main__":
@@ -281,7 +297,11 @@ if __name__ == "__main__":
         _probe(sys.argv[2])
     elif len(sys.argv) >= 2:
         for s in score_date(sys.argv[1]):
-            print(f"{s.away} vs {s.home}  EI={s.excitement}  "
-                  f"LC={s.lead_changes}  tight={s.late_tight}  {s.badge}")
+            tag = []
+            if s.is_comeback: tag.append("CB")
+            if s.is_back_forth: tag.append("BF")
+            mark = "+".join(tag) if tag else "--"
+            print(f"{s.away} vs {s.home}  swings={s.big_swings} "
+                  f"low={s.winner_low} move={s.total_movement}  [{mark}] {s.badge}")
     else:
         print("Usage: score_games.py <YYYY-MM-DD> | --probe <gamePk>")
