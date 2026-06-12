@@ -1,0 +1,42 @@
+name: Squiggle daily post
+
+on:
+  schedule:
+    # 10:00 UTC = 6am EDT. Single daily run covers the night's slate
+    # including West Coast finishes. MLB season is all EDT, so one entry
+    # avoids any double-post risk.
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Override slate date (YYYY-MM-DD), optional"
+        required: false
+      dry_run:
+        description: "Set to 1 to print instead of post"
+        required: false
+        default: "0"
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run Squiggle
+        env:
+          BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
+          BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            python run.py "${{ github.event.inputs.date }}"
+          else
+            python run.py
+          fi
