@@ -15,12 +15,19 @@ MAX_GAMES = 3
 INTRO = "Tonight's squiggliest ⚾️"
 FOOTER = "Spoiler-free. Go watch before you scroll."
 
-# Hard denylist — if any of these appear in the final post, we refuse to post.
+# Hard denylist — result-revealing language. Matched as whole words/phrases
+# (word boundaries) so legitimate team names never trip it: "Twins" must not
+# match "wins", "White Sox" must not match anything, etc.
 DENY_TERMS = [
     "walk-off", "walkoff", "walk off",
-    "comeback win", "wins", " won", "beat ", "defeat",
-    "final score", "clinch", "sweep", "extra innings", "extras",
+    "comeback win", "win", "wins", "won", "beat", "defeat", "defeated",
+    "final score", "clinch", "clinched", "sweep", "swept",
+    "extra innings", "extras", "loses", "lost", "blowout",
 ]
+# Compile each term with word boundaries. \b handles the Twins/wins problem:
+# \bwins\b matches "team wins" but not the "wins" inside "Twins".
+_DENY_PATTERNS = [re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE)
+                  for t in DENY_TERMS]
 # Any "digit-dash-digit" looks like a score; block it.
 SCORE_PATTERN = re.compile(r"\b\d{1,2}\s*[-–]\s*\d{1,2}\b")
 
@@ -55,9 +62,9 @@ def build_post(scored: list) -> str | None:
 
 
 def _lint_or_raise(text: str) -> None:
-    low = text.lower()
-    for term in DENY_TERMS:
-        if term in low:
-            raise SpoilerLeak(f"Denylist term in post: {term!r}")
+    for pat in _DENY_PATTERNS:
+        m = pat.search(text)
+        if m:
+            raise SpoilerLeak(f"Denylist term in post: {m.group(0)!r}")
     if SCORE_PATTERN.search(text):
         raise SpoilerLeak("Score-like pattern detected in post.")
