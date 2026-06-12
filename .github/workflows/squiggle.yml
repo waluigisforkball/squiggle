@@ -2,9 +2,9 @@ name: Squiggle daily post
 
 on:
   schedule:
-    # 10:00 UTC = 6am EDT. Single daily run covers the night's slate
-    # including West Coast finishes. MLB season is all EDT, so one entry
-    # avoids any double-post risk.
+    # 10:00 UTC = 6am EDT (summer ball season). Single daily run; MLB's
+    # regular season runs Mar–Oct, all on EDT, so one entry avoids any
+    # double-post risk. Adjust if you ever want offseason winter-ball coverage.
     - cron: "0 10 * * *"
   workflow_dispatch:
     inputs:
@@ -40,3 +40,11 @@ jobs:
           else
             python run.py
           fi
+
+      - name: Upload chart preview
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: squiggle-chart
+          path: squiggle_chart.png
+          if-no-files-found: ignore
