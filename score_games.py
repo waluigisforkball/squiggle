@@ -50,10 +50,16 @@ class GameScore:
     game_pk: int
     away: str
     home: str
+    away_abbr: str
+    home_abbr: str
     excitement: float
     lead_changes: int
     late_tight: bool
-    badge: str  # emoji + label
+    badge: str           # emoji + label (for post text)
+    series: list         # home win prob per play, 0..1 (for the chart)
+    innings: list        # parallel inning number per play (for x-axis)
+    away_score: int      # final score (for post text only, never the chart)
+    home_score: int
 
 
 def _get_json(url: str):
@@ -70,7 +76,7 @@ def _get_json(url: str):
 
 
 def fetch_completed_games(date: str) -> list[dict]:
-    """Return [{gamePk, away, home}] for games that are Final on `date`."""
+    """Return [{gamePk, away, home, away_abbr, home_abbr}] for Final games."""
     data = _get_json(SCHEDULE_URL.format(date=date))
     dates = data.get("dates", []) if data else []
     if not dates:
@@ -80,14 +86,29 @@ def fetch_completed_games(date: str) -> list[dict]:
         state = g.get("status", {}).get("abstractGameState", "")
         if state != "Final":
             continue
+        away_t = g["teams"]["away"]["team"]
+        home_t = g["teams"]["home"]["team"]
         out.append(
             {
                 "gamePk": g["gamePk"],
-                "away": g["teams"]["away"]["team"]["name"],
-                "home": g["teams"]["home"]["team"]["name"],
+                "away": away_t["name"],
+                "home": home_t["name"],
+                # abbreviation may not be on the schedule team stub; fall back
+                # to a short slice of the name, corrected later if needed.
+                "away_abbr": away_t.get("abbreviation")
+                             or _abbr_fallback(away_t["name"]),
+                "home_abbr": home_t.get("abbreviation")
+                             or _abbr_fallback(home_t["name"]),
             }
         )
     return out
+
+
+def _abbr_fallback(name: str) -> str:
+    """Last-resort abbreviation if the API stub lacks one: initials of the
+    final word(s). e.g. 'Red Sox' -> 'RS'. Real abbr comes from the API."""
+    parts = name.split()
+    return (parts[-1][:3]).upper() if parts else name[:3].upper()
 
 
 def _extract_home_wp(play: dict):
@@ -102,17 +123,33 @@ def _extract_home_wp(play: dict):
     return None
 
 
-def fetch_wp_series(game_pk: int) -> list[float]:
-    """Ordered list of home-win-probability values (0..1), one per play."""
+def fetch_wp_series(game_pk: int):
+    """
+    Return (series, innings, final_away, final_home):
+      series  - home win prob per play, 0..1
+      innings - parallel inning number per play
+      final_*  - final score from the last play's result block
+    On error returns ([], [], None, None).
+    """
     plays = _get_json(WP_URL.format(game_pk=game_pk))
-    if not isinstance(plays, list):
-        return []
-    series = []
+    if not isinstance(plays, list) or not plays:
+        return [], [], None, None
+    series, innings = [], []
     for p in plays:
         wp = _extract_home_wp(p)
-        if wp is not None:
-            series.append(wp)
-    return series
+        if wp is None:
+            continue
+        series.append(wp)
+        innings.append(p.get("about", {}).get("inning", 0))
+    # Final score: scan from the end for a play that carries both scores.
+    final_away = final_home = None
+    for p in reversed(plays):
+        res = p.get("result", {})
+        if "awayScore" in res and "homeScore" in res:
+            final_away = res["awayScore"]
+            final_home = res["homeScore"]
+            break
+    return series, innings, final_away, final_home
 
 
 def excitement_index(series: list[float]) -> float:
@@ -144,15 +181,20 @@ def count_lead_changes(series: list[float]) -> int:
     return changes
 
 
-def late_tightness(series: list[float], plays_meta: list[dict] | None = None) -> bool:
+def late_tightness(series: list[float], innings: list | None = None) -> bool:
     """
-    Approx: was the game still within TIGHT_BAND of 50% deep in the game?
-    Without per-play inning data we approximate "late" as the final third of
-    plays, which reliably maps to ~7th inning onward.
+    Was the game still within TIGHT_BAND of 50% in the late innings (7+)?
+    Uses real inning data when provided; otherwise approximates "late" as the
+    final third of plays.
     """
     if len(series) < 6:
         return False
-    tail = series[int(len(series) * 0.66):]
+    if innings and len(innings) == len(series):
+        tail = [wp for wp, inn in zip(series, innings) if inn >= LATE_INNING]
+        if not tail:
+            tail = series[int(len(series) * 0.66):]
+    else:
+        tail = series[int(len(series) * 0.66):]
     return any(abs(wp - LEAD_LINE) <= TIGHT_BAND for wp in tail)
 
 
@@ -172,20 +214,26 @@ def categorize(ei: float, lead_changes: int, late_tight: bool) -> str:
 
 
 def score_game(game: dict) -> GameScore | None:
-    series = fetch_wp_series(game["gamePk"])
+    series, innings, away_score, home_score = fetch_wp_series(game["gamePk"])
     if len(series) < 2:
         return None
     ei = excitement_index(series)
     lc = count_lead_changes(series)
-    lt = late_tightness(series)
+    lt = late_tightness(series, innings)
     return GameScore(
         game_pk=game["gamePk"],
         away=game["away"],
         home=game["home"],
+        away_abbr=game["away_abbr"],
+        home_abbr=game["home_abbr"],
         excitement=round(ei, 3),
         lead_changes=lc,
         late_tight=lt,
         badge=categorize(ei, lc, lt),
+        series=series,
+        innings=innings,
+        away_score=away_score if away_score is not None else 0,
+        home_score=home_score if home_score is not None else 0,
     )
 
 
@@ -219,12 +267,13 @@ def _probe(game_pk: int) -> None:
     print("homeTeamWinProbability:", sample.get("homeTeamWinProbability"))
     wp = _extract_home_wp(sample)
     print("Extracted home WP (normalized 0..1):", wp)
-    series = fetch_wp_series(int(game_pk))
-    print(f"Series length: {len(series)}")
+    series, innings, fa, fh = fetch_wp_series(int(game_pk))
+    print(f"Series length: {len(series)}  innings captured: {len(innings)}")
+    print(f"Final score (away-home): {fa}-{fh}")
     if series:
         print(f"EI: {excitement_index(series):.3f}  "
               f"lead_changes: {count_lead_changes(series)}  "
-              f"late_tight: {late_tightness(series)}")
+              f"late_tight: {late_tightness(series, innings)}")
 
 
 if __name__ == "__main__":
