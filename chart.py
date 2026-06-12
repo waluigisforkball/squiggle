@@ -25,11 +25,11 @@ import numpy as np
 from matplotlib.collections import LineCollection
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 
-# --- Brand tokens ---------------------------------------------------------
-BG = "#15120a"
-MID = "#3a3528"
-TEXT = "#f4f1e9"
-SUBTLE = "#8a8270"
+# --- Brand tokens (light theme) ------------------------------------------
+BG = "#faf8f3"          # warm off-white background
+MID = "#d6d0c4"         # 50% baseline (muted warm gray)
+TEXT = "#15120a"        # near-black text
+SUBTLE = "#8a8270"      # axis labels / ticks
 DEFAULT_LINE = "#1a6ef5"
 
 LOGO_URL = "https://www.mlbstatic.com/team-logos/{team_id}.svg"
@@ -45,9 +45,9 @@ plt.rcParams.update({
 })
 
 BADGE_STYLE = {
-    "🎢 Back-and-forth": ("BACK-AND-FORTH", "#1a6ef5"),
-    "🔁 Comeback": ("COMEBACK", "#f5a31a"),
-    "🔁🎢 Comeback + Back-and-forth": ("COMEBACK + B&F", "#e0457b"),
+    "🎢 Back-and-forth": ("BACK-AND-FORTH", "#1457c4"),
+    "🔁 Comeback": ("COMEBACK", "#c47a00"),
+    "🔁🎢 Comeback + Back-and-forth": ("COMEBACK + B&F", "#c41e5a"),
 }
 
 
@@ -58,6 +58,15 @@ def _badge(badge: str):
 def _hex_to_rgb(h: str):
     h = h.lstrip("#")
     return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+
+
+def _visible_on_light(rgb):
+    """Nudge near-white colors darker so the line stays visible on white."""
+    r, g, b = rgb
+    luma = 0.299 * r + 0.587 * g + 0.114 * b
+    if luma > 0.82:                       # too light to see on cream bg
+        return tuple(c * 0.62 for c in rgb)
+    return rgb
 
 
 def _gradient_segments(x, y, away_rgb, home_rgb):
@@ -96,8 +105,8 @@ def _draw_one(ax, g, is_hero: bool) -> None:
     ax.axhline(0.5, color=MID, lw=1.2, ls=(0, (1, 4)), zorder=1)
 
     # gradient squiggle
-    away_rgb = _hex_to_rgb(g["away_color"])
-    home_rgb = _hex_to_rgb(g["home_color"])
+    away_rgb = _visible_on_light(_hex_to_rgb(g["away_color"]))
+    home_rgb = _visible_on_light(_hex_to_rgb(g["home_color"]))
     lc = _gradient_segments(x, y, away_rgb, home_rgb)
     lc.set_linewidth(3.2 if is_hero else 2.2)
     lc.set_capstyle("round")
