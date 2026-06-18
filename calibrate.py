@@ -32,9 +32,8 @@ def main(dates: list[str]) -> None:
         print("-" * 78)
         print(f"{len(rows)} games | comebacks: {cbs} | back-and-forth: {bfs}")
         print(f"thresholds: comeback low<={sg.COMEBACK_MAX_LOW} | "
-              f"B&F needs swings>={sg.BACK_FORTH_MIN_SWINGS} "
-              f"AND leads>={sg.BACK_FORTH_MIN_LEAD_CHANGES} "
-              f"(swing size {sg.SWING_THRESHOLD})")
+              f"B&F needs leads>={sg.BACK_FORTH_MIN_LEAD_CHANGES} "
+              f"AND move>={sg.BACK_FORTH_MIN_MOVEMENT}")
 
 
 if __name__ == "__main__":
