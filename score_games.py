@@ -95,6 +95,10 @@ def team_color(name: str) -> str:
     return TEAM_INFO[name][2] if name in TEAM_INFO else "#1a6ef5"
 
 
+def team_secondary(name: str) -> str:
+    return TEAM_INFO[name][3] if name in TEAM_INFO else "#888888"
+
+
 @dataclass
 class GameScore:
     game_pk: int
@@ -104,6 +108,8 @@ class GameScore:
     home_abbr: str
     away_color: str
     home_color: str
+    away_color2: str
+    home_color2: str
     away_id: int
     home_id: int
     # metrics
@@ -283,6 +289,8 @@ def score_game(game: dict) -> GameScore | None:
         game_pk=game["gamePk"], away=game["away"], home=game["home"],
         away_abbr=game["away_abbr"], home_abbr=game["home_abbr"],
         away_color=team_color(game["away"]), home_color=team_color(game["home"]),
+        away_color2=team_secondary(game["away"]),
+        home_color2=team_secondary(game["home"]),
         away_id=team_id(game["away"]) or 0, home_id=team_id(game["home"]) or 0,
         total_movement=round(tm, 3), big_swings=swings, lead_changes=leads,
         winner_low=round(low, 3), is_comeback=is_cb, is_back_forth=is_bf,
