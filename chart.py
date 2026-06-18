@@ -60,13 +60,21 @@ def _hex_to_rgb(h: str):
     return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
 
 
-def _visible_on_light(rgb):
-    """Nudge near-white colors darker so the line stays visible on white."""
+def _vivid(rgb):
+    """
+    Make team colors pop on the cream background: boost saturation and lift
+    very dark colors toward their hue so deep navies/maroons read as color,
+    not as black. Keeps already-bright colors mostly as-is.
+    """
+    import colorsys
     r, g, b = rgb
-    luma = 0.299 * r + 0.587 * g + 0.114 * b
-    if luma > 0.82:                       # too light to see on cream bg
-        return tuple(c * 0.62 for c in rgb)
-    return rgb
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    s = min(1.0, s * 1.35 + 0.05)          # punch up saturation
+    if l < 0.35:                            # lift very dark colors
+        l = 0.42
+    elif l > 0.82:                          # darken near-white a touch
+        l = 0.70
+    return colorsys.hls_to_rgb(h, l, s)
 
 
 def _gradient_segments(x, y, away_rgb, home_rgb):
@@ -104,16 +112,17 @@ def _draw_one(ax, g, is_hero: bool) -> None:
 
     ax.axhline(0.5, color=MID, lw=1.2, ls=(0, (1, 4)), zorder=1)
 
-    # gradient squiggle
-    away_rgb = _visible_on_light(_hex_to_rgb(g["away_color"]))
-    home_rgb = _visible_on_light(_hex_to_rgb(g["home_color"]))
+    # gradient squiggle — vivid team colors, thick line
+    away_rgb = _vivid(_hex_to_rgb(g["away_color"]))
+    home_rgb = _vivid(_hex_to_rgb(g["home_color"]))
     lc = _gradient_segments(x, y, away_rgb, home_rgb)
-    lc.set_linewidth(3.2 if is_hero else 2.2)
+    lc.set_linewidth(5.0 if is_hero else 3.6)
     lc.set_capstyle("round")
+    lc.set_joinstyle("round")
     lc.set_zorder(3)
     ax.add_collection(lc)
     ax.plot(x[-1], y[-1], "o", color=home_rgb if y[-1] >= 0.5 else away_rgb,
-            ms=7 if is_hero else 5, zorder=4)
+            ms=9 if is_hero else 6, zorder=4)
 
     ax.set_ylim(0, 1)
     ax.set_yticks([0, 0.5, 1])

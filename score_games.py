@@ -28,11 +28,19 @@ WP_URL = "https://statsapi.mlb.com/api/v1/game/{game_pk}/winProbability"
 # COMEBACK: the eventual winner must have fallen at or below this WP at some
 # point. 0.15 = "deep hole" (winner was once <=15% to win).
 COMEBACK_MAX_LOW = 0.15
-# BACK-AND-FORTH: a "significant swing" is a peak-to-trough (or trough-to-peak)
-# reversal of at least this much WP. 0.40 = only big, game-defining swings.
-SWING_THRESHOLD = 0.40
-# How many significant swings to qualify as a back-and-forth game.
-BACK_FORTH_MIN_SWINGS = 2
+# COMEBACK: the eventual winner must have fallen at or below this WP. 0.10 =
+# only near-death escapes (winner was once <=10% to win). Tuned on real data.
+COMEBACK_MAX_LOW = 0.10
+
+# BACK-AND-FORTH: defined by the lead genuinely changing hands several times
+# AND high total movement. The old single-swing magnitude counter proved too
+# brittle on real MLB WP (which zigzags in steps, rarely one clean 45% move),
+# so we use lead changes + total movement, which track the real games well.
+LEAD_LINE = 0.50
+LEAD_DEADBAND = 0.10               # must reach 0.40/0.60 to "commit" to a side
+BACK_FORTH_MIN_LEAD_CHANGES = 3   # lead changes hands 3+ times
+BACK_FORTH_MIN_MOVEMENT = 3.5     # and total |WP change| >= this
+SWING_THRESHOLD = 0.40            # big-swing size; kept for diagnostics only
 
 # --- Team abbreviations, IDs, and colors ----------------------------------
 # Full name -> (abbreviation, MLB team id, primary hex, secondary hex).
@@ -100,7 +108,8 @@ class GameScore:
     home_id: int
     # metrics
     total_movement: float        # old EI, diagnostic/tiebreak only
-    big_swings: int              # count of 40%+ reversals
+    big_swings: int              # count of big reversals
+    lead_changes: int            # decisive lead changes (50% crossings)
     winner_low: float            # eventual winner's lowest WP (0..1)
     is_comeback: bool
     is_back_forth: bool
@@ -175,6 +184,25 @@ def total_movement(series: list[float]) -> float:
     return sum(abs(series[i] - series[i - 1]) for i in range(1, len(series)))
 
 
+def count_lead_changes(series: list[float]) -> int:
+    """
+    Decisive lead changes: how many times the favored side flips. A side is
+    only 'committed' once WP passes 50% by LEAD_DEADBAND (>=0.60 home / <=0.40
+    away), so wobble right at 50% is ignored. Counts flips between committed
+    sides — the real 'who's winning changed hands' signal.
+    """
+    hi, lo = LEAD_LINE + LEAD_DEADBAND, LEAD_LINE - LEAD_DEADBAND
+    side, changes = 0, 0
+    for wp in series:
+        new = 1 if wp >= hi else (-1 if wp <= lo else 0)
+        if new == 0:
+            continue
+        if side != 0 and new != side:
+            changes += 1
+        side = new
+    return changes
+
+
 def count_big_swings(series: list[float], threshold: float = SWING_THRESHOLD) -> int:
     """
     Count significant peak-to-trough reversals of >= threshold WP.
@@ -245,15 +273,18 @@ def score_game(game: dict) -> GameScore | None:
     h_score = h_score or 0
     tm = total_movement(series)
     swings = count_big_swings(series)
+    leads = count_lead_changes(series)
     low = winner_low_point(series, h_score, a_score)
     is_cb = low <= COMEBACK_MAX_LOW
-    is_bf = swings >= BACK_FORTH_MIN_SWINGS
+    # back-and-forth: lead changes hands enough AND lots of total movement
+    is_bf = (leads >= BACK_FORTH_MIN_LEAD_CHANGES
+             and tm >= BACK_FORTH_MIN_MOVEMENT)
     return GameScore(
         game_pk=game["gamePk"], away=game["away"], home=game["home"],
         away_abbr=game["away_abbr"], home_abbr=game["home_abbr"],
         away_color=team_color(game["away"]), home_color=team_color(game["home"]),
         away_id=team_id(game["away"]) or 0, home_id=team_id(game["home"]) or 0,
-        total_movement=round(tm, 3), big_swings=swings,
+        total_movement=round(tm, 3), big_swings=swings, lead_changes=leads,
         winner_low=round(low, 3), is_comeback=is_cb, is_back_forth=is_bf,
         badge=categorize(is_cb, is_bf),
         series=series, innings=innings,
@@ -268,9 +299,9 @@ def qualifies(s: GameScore) -> bool:
 def score_date(date: str) -> list[GameScore]:
     games = fetch_completed_games(date)
     scored = [s for g in games if (s := score_game(g))]
-    # Rank by big swings, then comeback depth, then total movement.
-    scored.sort(key=lambda s: (s.big_swings, 1.0 - s.winner_low,
-                               s.total_movement), reverse=True)
+    # Rank by lead changes, then total movement, then comeback depth.
+    scored.sort(key=lambda s: (s.lead_changes, s.total_movement,
+                               1.0 - s.winner_low), reverse=True)
     return scored
 
 
@@ -286,10 +317,12 @@ def _probe(game_pk: int) -> None:
     print(f"Series length: {len(series)}  final (away-home): {fa}-{fh}")
     if series:
         low = winner_low_point(series, fh or 0, fa or 0)
-        print(f"big_swings(40%): {count_big_swings(series)}  "
+        leads = count_lead_changes(series)
+        print(f"big_swings: {count_big_swings(series)}  lead_changes: {leads}  "
               f"winner_low: {low:.3f}  total_movement: {total_movement(series):.3f}")
-        print(f"comeback: {low <= COMEBACK_MAX_LOW}  "
-              f"back_forth: {count_big_swings(series) >= BACK_FORTH_MIN_SWINGS}")
+        bf = (leads >= BACK_FORTH_MIN_LEAD_CHANGES
+              and total_movement(series) >= BACK_FORTH_MIN_MOVEMENT)
+        print(f"comeback: {low <= COMEBACK_MAX_LOW}  back_forth: {bf}")
 
 
 if __name__ == "__main__":

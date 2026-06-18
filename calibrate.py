@@ -17,20 +17,24 @@ def main(dates: list[str]) -> None:
     rows = []
     for d in dates:
         for s in sg.score_date(d):
-            rows.append((s.big_swings, s.winner_low, s.total_movement, d,
-                         f"{s.away} vs {s.home}", s.is_comeback, s.is_back_forth))
+            rows.append((s.big_swings, s.lead_changes, s.winner_low,
+                         s.total_movement, d, f"{s.away} vs {s.home}",
+                         s.is_comeback, s.is_back_forth))
     rows.sort(reverse=True)
-    print(f"{'swings':>6} {'low':>6} {'move':>6}  date        matchup")
-    print("-" * 72)
-    for sw, low, mv, d, m, cb, bf in rows:
+    print(f"{'swings':>6} {'leads':>5} {'low':>6} {'move':>6}  date        matchup")
+    print("-" * 78)
+    for sw, ld, low, mv, d, m, cb, bf in rows:
         tag = "+".join([t for t, on in (("CB", cb), ("BF", bf)) if on]) or "--"
-        print(f"{sw:>6} {low:>6.3f} {mv:>6.2f}  {d:<10}  {m}  [{tag}]")
+        print(f"{sw:>6} {ld:>5} {low:>6.3f} {mv:>6.2f}  {d:<10}  {m}  [{tag}]")
     if rows:
-        cbs = sum(1 for r in rows if r[5])
-        bfs = sum(1 for r in rows if r[6])
-        print("-" * 72)
-        print(f"{len(rows)} games | comebacks: {cbs} | back-and-forth: {bfs} "
-              f"| thresholds: low<={sg.COMEBACK_MAX_LOW} swings>={sg.BACK_FORTH_MIN_SWINGS}")
+        cbs = sum(1 for r in rows if r[6])
+        bfs = sum(1 for r in rows if r[7])
+        print("-" * 78)
+        print(f"{len(rows)} games | comebacks: {cbs} | back-and-forth: {bfs}")
+        print(f"thresholds: comeback low<={sg.COMEBACK_MAX_LOW} | "
+              f"B&F needs swings>={sg.BACK_FORTH_MIN_SWINGS} "
+              f"AND leads>={sg.BACK_FORTH_MIN_LEAD_CHANGES} "
+              f"(swing size {sg.SWING_THRESHOLD})")
 
 
 if __name__ == "__main__":
