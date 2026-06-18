@@ -46,6 +46,7 @@ def to_chart_dict(s) -> dict:
         "away": s.away, "home": s.home,
         "away_abbr": s.away_abbr, "home_abbr": s.home_abbr,
         "away_color": s.away_color, "home_color": s.home_color,
+        "away_color2": s.away_color2, "home_color2": s.home_color2,
         "away_id": s.away_id, "home_id": s.home_id,
         "badge": s.badge, "series": s.series, "innings": s.innings,
     }
