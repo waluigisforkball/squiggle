@@ -62,7 +62,9 @@ def main() -> int:
 
     games = select_games(scored)
     print(f"[squiggle] {len(scored)} scored; posting {len(games)} "
-          f"(comeback<= {sg.COMEBACK_MAX_LOW}, swings>= {sg.BACK_FORTH_MIN_SWINGS})")
+          f"(comeback<= {sg.COMEBACK_MAX_LOW}, "
+          f"leads>= {sg.BACK_FORTH_MIN_LEAD_CHANGES}, "
+          f"move>= {sg.BACK_FORTH_MIN_MOVEMENT})")
 
     text = build_post_text(games)
     if not text:
