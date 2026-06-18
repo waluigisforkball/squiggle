@@ -77,6 +77,43 @@ def _vivid(rgb):
     return colorsys.hls_to_rgb(h, l, s)
 
 
+def _dist(a, b):
+    """Euclidean distance between two RGB tuples (0..~1.73)."""
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def _shift_hue(rgb, degrees=0.5):
+    """Rotate a color's hue to force separation as a last resort."""
+    import colorsys
+    h, l, s = colorsys.rgb_to_hls(*rgb)
+    return colorsys.hls_to_rgb((h + degrees) % 1.0, l, max(s, 0.5))
+
+
+def resolve_colors(away_c, home_c, away_c2, home_c2):
+    """
+    Return (away_rgb, home_rgb) that are visually distinct. Start from each
+    team's vivid primary; if they're too close (same color family, e.g.
+    Rays/Dodgers blue), swap the HOME team to its secondary, then if still
+    close, hue-shift the home color until it separates.
+    """
+    away = _vivid(_hex_to_rgb(away_c))
+    home = _vivid(_hex_to_rgb(home_c))
+    MIN_SEP = 0.35
+    if _dist(away, home) >= MIN_SEP:
+        return away, home
+    # too similar — try home's secondary color
+    alt = _vivid(_hex_to_rgb(home_c2))
+    if _dist(away, alt) >= MIN_SEP:
+        return away, alt
+    # still too close — hue-shift the home primary until separated
+    shifted = home
+    for _ in range(5):
+        shifted = _shift_hue(shifted, 0.18)
+        if _dist(away, shifted) >= MIN_SEP:
+            break
+    return away, shifted
+
+
 def _gradient_segments(x, y, away_rgb, home_rgb):
     """Build a LineCollection whose color interpolates away->home by height."""
     pts = np.array([x, y]).T.reshape(-1, 1, 2)
@@ -112,9 +149,10 @@ def _draw_one(ax, g, is_hero: bool) -> None:
 
     ax.axhline(0.5, color=MID, lw=1.2, ls=(0, (1, 4)), zorder=1)
 
-    # gradient squiggle — vivid team colors, thick line
-    away_rgb = _vivid(_hex_to_rgb(g["away_color"]))
-    home_rgb = _vivid(_hex_to_rgb(g["home_color"]))
+    # gradient squiggle — distinct team colors (differentiated if too similar)
+    away_rgb, home_rgb = resolve_colors(
+        g["away_color"], g["home_color"],
+        g.get("away_color2", "#888888"), g.get("home_color2", "#888888"))
     lc = _gradient_segments(x, y, away_rgb, home_rgb)
     lc.set_linewidth(5.0 if is_hero else 3.6)
     lc.set_capstyle("round")
@@ -160,7 +198,7 @@ def _place_marker(ax, team_id, abbr, color, y):
     if logo is not None:
         im = OffsetImage(logo, zoom=0.32)
         ab = AnnotationBbox(im, (0, y), xycoords=("axes fraction", "data"),
-                            box_alignment=(1.1, 0.5), frameon=False,
+                            box_alignment=(1.35, 0.5), frameon=False,
                             annotation_clip=False)
         ax.add_artist(ab)
     else:
@@ -176,8 +214,8 @@ def render_chart(games: list[dict], out_path: str) -> str:
     heights = [1.8] + [1.0] * (n - 1) if n > 1 else [1.6]
     fig_h = 3.4 + 2.0 * (n - 1)
     fig = plt.figure(figsize=(8, fig_h), dpi=150)
-    gs = fig.add_gridspec(n, 1, height_ratios=heights, hspace=0.7,
-                          left=0.13, right=0.95, top=0.90, bottom=0.08)
+    gs = fig.add_gridspec(n, 1, height_ratios=heights, hspace=0.8,
+                          left=0.17, right=0.93, top=0.90, bottom=0.12)
     for i, g in enumerate(games):
         _draw_one(fig.add_subplot(gs[i]), g, is_hero=(i == 0))
     fig.text(0.95, 0.012, "@squigglebaseball", ha="right", va="bottom",
